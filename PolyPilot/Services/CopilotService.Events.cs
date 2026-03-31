@@ -612,13 +612,25 @@ public partial class CopilotService
                                 return;
                             }
                             // Guard: if tools were used this turn, more agent rounds may follow
-                            // (TurnEnd → thinking → TurnStart → more tools). Firing CompleteResponse
-                            // here would prematurely end the turn. Skip the fallback entirely and
-                            // let the watchdog handle any genuinely stuck sessions.
+                            // (TurnEnd → thinking → TurnStart → more tools). Wait an additional
+                            // period before completing — if no TurnStart arrives, SessionIdleEvent
+                            // was lost and this is genuinely the final turn.
                             if (state.HasUsedToolsThisTurn)
                             {
-                                Debug($"[IDLE-FALLBACK] '{sessionName}' skipped — tools were used this turn (watchdog will handle if stuck)");
-                                return;
+                                Debug($"[IDLE-FALLBACK] '{sessionName}' tools were used — waiting additional {TurnEndIdleToolFallbackAdditionalMs}ms before completing");
+                                try
+                                {
+                                    await Task.Delay(TurnEndIdleToolFallbackAdditionalMs, fallbackToken);
+                                }
+                                catch (OperationCanceledException) { return; }
+                                if (fallbackToken.IsCancellationRequested) return;
+                                if (state.IsOrphaned) return;
+                                // Re-check: if tools became active during the wait, another round started
+                                if (Volatile.Read(ref state.ActiveToolCallCount) > 0)
+                                {
+                                    Debug($"[IDLE-FALLBACK] '{sessionName}' skipped after tool wait — tools active again");
+                                    return;
+                                }
                             }
                             Debug($"[IDLE-FALLBACK] '{sessionName}' SessionIdleEvent not received {TurnEndIdleFallbackMs}ms after TurnEnd — firing CompleteResponse");
                             CaptureZeroIdleDiagnostics(state, sessionName, toolsUsed: false);
